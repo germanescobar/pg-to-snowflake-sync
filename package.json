@@ -1,0 +1,29 @@
+{
+  "name": "pg-to-snowflake-sync",
+  "version": "1.0.0",
+  "description": "PostgreSQL to Snowflake data sync tool",
+  "main": "dist/pg-to-snowflake-sync.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "fast-csv": "^5.0.2",
+    "pg": "^8.11.0",
+    "pg-cursor": "^2.13.1",
+    "pg-logical-replication": "^2.0.7",
+    "snowflake-sdk": "^1.6.24"
+  },
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/node": "^20.3.1",
+    "@types/pg": "^8.10.2",
+    "@types/pg-cursor": "^2.7.2",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.1.3"
+  }
+}

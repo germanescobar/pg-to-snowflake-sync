@@ -1,0 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+* This is a TypeScript project that allows users to sync PostgreSQL data to Snowflake.
+* Write clear, concise TypeScript code.
+* 
