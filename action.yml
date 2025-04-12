@@ -1,0 +1,46 @@
+name: 'PostgreSQL to Snowflake Sync'
+description: 'A GitHub Action to sync data from PostgreSQL to Snowflake.'
+author: 'German Escobar'
+inputs:
+  pg_host:
+    description: 'PostgreSQL host'
+    required: true
+  pg_port:
+    description: 'PostgreSQL port'
+    required: true
+  pg_database:
+    description: 'PostgreSQL database'
+    required: true
+  pg_user:
+    description: 'PostgreSQL user'
+    required: true
+  pg_password:
+    description: 'PostgreSQL password'
+    required: true
+  sf_account:
+    description: 'Snowflake account'
+    required: true
+  sf_username:
+    description: 'Snowflake username'
+    required: true
+  sf_password:
+    description: 'Snowflake password'
+    required: true
+  sf_database:
+    description: 'Snowflake database'
+    required: true
+  sf_schema:
+    description: 'Snowflake schema'
+    required: true
+  sf_warehouse:
+    description: 'Snowflake warehouse'
+    required: true
+  sf_role:
+    description: 'Snowflake role'
+    required: true
+  excluded_tables:
+    description: 'Comma-separated list of tables to exclude from sync'
+    required: false
+runs:
+  using: 'node20'
+  main: 'dist/pg-to-snowflake-sync.js' 

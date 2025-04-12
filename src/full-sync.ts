@@ -8,12 +8,13 @@ import fsPromises from 'fs/promises';
 import * as csv from 'fast-csv';
 import * as path from 'path';
 
-export async function resyncData(config: Config): Promise<void> {
+export async function runFullSync(config: Config): Promise<void> {
   let pgClient: Client | null = null;
   let snowflakeConn: snowflake.Connection | null = null;
   
   try {
-    console.log('Starting full resync process using Snowflake staging...');
+    console.log('Starting full sync process ...');
+    const start = Date.now();
     
     // 1. Connect to services
     pgClient = await connectToPostgresClient(config);
@@ -278,7 +279,8 @@ export async function resyncData(config: Config): Promise<void> {
     // 9. Store the LSN for future incremental syncs
     await fsPromises.writeFile('./sync-state.json', JSON.stringify({ lastLSN: startLSN }));
     
-    console.log(`Full resync completed successfully. Future incremental syncs will start from LSN: ${startLSN}`);
+    const end = Date.now();
+    console.log(`Full resync completed successfully in ${((end - start) / 1000).toFixed(2)} seconds. Future incremental syncs will start from LSN: ${startLSN}`);
   } catch (error) {
     console.error('Error during resync:', error);
     throw error;

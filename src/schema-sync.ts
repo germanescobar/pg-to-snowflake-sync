@@ -88,7 +88,7 @@ async function loadSchemaFromSnowflake(snowflakeConn: snowflake.Connection, conf
       // Create column map for this table
       const columnMap = new Map<string, SnowflakeColumn>();
       
-      columns.forEach(col => {
+      columns.forEach((col: any) => {
         columnMap.set(col.COLUMN_NAME.toLowerCase(), {
           name: col.COLUMN_NAME.toLowerCase(),
           dataType: col.DATA_TYPE,
@@ -387,7 +387,7 @@ async function updateSnowflakeTable(
   
   // Map of existing columns for easy lookup
   const sfColumns = new Map();
-  existingColumns.forEach(col => {
+  existingColumns.forEach((col: any) => {
     sfColumns.set(col.COLUMN_NAME.toLowerCase(), {
       dataType: col.DATA_TYPE,
       isNullable: col.IS_NULLABLE

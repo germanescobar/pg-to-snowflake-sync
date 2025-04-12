@@ -1,59 +1,85 @@
-import { Client } from 'pg';
-import { connectToPostgresClient, executeSnowflakeQuery, formatValueForSnowflake } from './utils';
-import { Config } from './types';
-import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
 import snowflake from 'snowflake-sdk';
+import { connectToPostgresClient, connectToSnowflake, executeSnowflakeQuery, formatValueForSnowflake } from './utils';
+import { Queue } from './utils';
+import { Config } from './types';
 import { createSchemaSync } from './schema-sync';
+import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
+import { Client } from 'pg';
 
-export async function syncData(snowflakeConn: snowflake.Connection, config: Config) {
-  let service: LogicalReplicationService | null = null;
-  // Track pending operations to ensure everything completes before closing
-  let pendingOperations: Promise<void>[] = [];
+export async function runIncrementalSync(config: Config) {
+  let snowflakeConn: snowflake.Connection | null = null;
+  
+  try {
+    console.log('Starting incremental sync process...');
+    const start = Date.now();
+
+    // Connect to Snowflake
+    snowflakeConn = await connectToSnowflake(config);
+
+    // Sync data from PostgreSQL to Snowflake
+    await syncData(snowflakeConn, config);
+
+    const end = Date.now();
+    console.log(`Incremental sync completed successfully in ${((end - start) / 1000).toFixed(2)} seconds`);
+  } catch (error) {
+    console.error('Error in replication process:', error);
+  } finally {
+    if (snowflakeConn) {
+      snowflakeConn.destroy((err: Error | undefined) => {
+        if (err) console.error('Error destroying Snowflake connection:', err);
+      });
+    }
+  }
+}
+
+// Flag to control the queue processor
+let isProcessing = true;
+
+async function syncData(snowflakeConn: snowflake.Connection, config: Config) {
+  // Queue of changes to process
+  const changeQueue = new Queue<{lsn: string, log: any}>();
 
   try {
-    // Capture the target LSN before we start syncing
-    const targetLSN = await getCurrentLSN(config);
-    const targetLSNNumeric = lsnToLong(targetLSN);
-    
-    console.log(`Syncing up to LSN: ${targetLSN}`);
+    // Create the function that updates the Snowflake schema
+    const updateSchema = await createSchemaSync(snowflakeConn, config);
 
+    // Start the worker that will process changes from the queue
+    const worker = startWorker(changeQueue, snowflakeConn, updateSchema);
+
+    // start the replication service and enqueue the changes
+    await sync(config, changeQueue);
+
+    // Wait for the worker to finish
+    await worker;
+  } catch (error) {
+    console.error('Error in syncData:', error);
+    throw error;
+  }
+}
+
+async function sync(config: Config, changeQueue: Queue<{lsn: string, log: any}>) {
+  // Capture the target LSN before we start syncing
+  const targetLSN = await getCurrentLSN(config);
+  const targetLSNNumeric = lsnToLong(targetLSN);
+
+  console.log(`Syncing up to LSN: ${targetLSN}`);
+
+  let service: LogicalReplicationService | null = null;
+
+  try {
     // Create the replication service
-    service = new LogicalReplicationService({
-      host: config.postgres.host,
-      port: config.postgres.port,
-      database: config.postgres.database,
-      user: config.postgres.user,
-      password: config.postgres.password,
-    },
-    {
-      acknowledge: {
-        auto: true,
-        timeoutSeconds: 10
-      }
-    });
+    service = createReplicationService(config);
 
     // Using pgoutput plugin (native to PostgreSQL, recommended)
     const plugin = new PgoutputPlugin({
       protoVersion: 1,
       publicationNames: [config.postgres.publicationName]
     });
-    
-    // Create the schema sync function that caches Snowflake schema
-    const updateSchema = await createSchemaSync(snowflakeConn, config);
-    
+
     // Promise to track completion of the sync
     const syncCompletionPromise = new Promise<void>((resolve, reject) => {
       // Track if we've reached our target LSN
       let reachedTargetLSN = false;
-
-      // Set up timeout to handle case where no changes occur
-      const maxWaitTime = 5000; // 5 seconds, adjust as needed
-      const noChangesTimeout = setTimeout(() => {
-        if (!reachedTargetLSN) {
-          console.log('No changes detected within timeout period, completing sync process');
-          Promise.all(pendingOperations).then(() => resolve()).catch(reject);
-        }
-      }, maxWaitTime);
       
       // Set up event handlers
       service!.on('data', async (lsn: string, log: any) => {
@@ -61,42 +87,21 @@ export async function syncData(snowflakeConn: snowflake.Connection, config: Conf
         
         const currentLSNNumeric = lsnToLong(lsn);
         
-        // Process and sync changes to Snowflake
-        // Instead of awaiting directly, add to pending operations
-        const operation = processChanges(snowflakeConn!, log, lsn, updateSchema)
-          .catch(error => console.error('Error processing change:', error));
-        pendingOperations.push(operation);
+        // Add the change to the queue
+        changeQueue.enqueue({ lsn, log });
         
         // Check if we've reached or exceeded our target LSN
         if (currentLSNNumeric >= targetLSNNumeric && !reachedTargetLSN) {
           reachedTargetLSN = true;
-          console.log(`Reached target LSN: ${lsn}, waiting for pending operations to complete`);
-          clearTimeout(noChangesTimeout);
-          
-          // Wait for all pending operations to complete before resolving
-          Promise.all(pendingOperations)
-            .then(() => {
-              console.log('All pending operations completed');
-              resolve();
-            })
-            .catch(error => {
-              console.error('Error in pending operations:', error);
-              reject(error);
-            });
+          console.log(`Reached target LSN: ${lsn}`);
+          await service!.stop();
+          resolve();
         }
       });
       
       service!.on('error', (error: Error) => {
         console.error('Replication error:', error);
-        clearTimeout(noChangesTimeout);
-        
-        // Still wait for pending operations before rejecting
-        Promise.all(pendingOperations)
-          .then(() => reject(error))
-          .catch(opError => {
-            console.error('Error in pending operations during error handling:', opError);
-            reject(error); // Still reject with the original error
-          });
+        reject(error);
       });
     });
 
@@ -108,20 +113,49 @@ export async function syncData(snowflakeConn: snowflake.Connection, config: Conf
     await syncCompletionPromise;
     console.log('Sync complete, all operations finished')
   } finally {
-    console.log('Cleaning up resources')
-    // Make sure to wait for pending operations even in cleanup
-    try {
-      if (pendingOperations.length > 0) {
-        console.log(`Waiting for ${pendingOperations.length} pending operations to complete before cleanup`);
-        await Promise.all(pendingOperations);
-      }
-    } catch (error) {
-      console.error('Error while waiting for pending operations during cleanup:', error);
-    }
+    isProcessing = false;
     
-    // Clean up resources
+    console.log('Cleaning up resources')
     if (service) {
-      await service.stop();
+      await service.stop()
+    }
+  }
+}
+
+function createReplicationService(config: Config) {
+  return new LogicalReplicationService({
+    host: config.postgres.host,
+    port: config.postgres.port,
+    database: config.postgres.database,
+    user: config.postgres.user,
+    password: config.postgres.password,
+  },
+  {
+    acknowledge: {
+      auto: true,
+      timeoutSeconds: 10
+    }
+  });
+}
+
+// Worker that processes changes from the queue
+async function startWorker(
+  queue: Queue<{lsn: string, log: any}>,
+  snowflakeConn: any,
+  updateSchema: (relation: any) => Promise<void>
+): Promise<void> {
+  while (isProcessing) {
+    const item = queue.dequeue();
+    
+    if (item) {
+      try {
+        await processChanges(snowflakeConn, item.log, item.lsn, updateSchema);
+      } catch (error) {
+        console.error('Error processing queued change:', error);
+      }
+    } else {
+      // If queue is empty, wait a bit before checking again
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 }
@@ -186,7 +220,7 @@ async function processChanges(
       case 'relation':
         console.log('Relation information received', log);
         // Use the updateSchema function to handle schema changes
-        await updateSchema(log.relation);
+        await updateSchema(log);
         break;
       default:
         console.log(`Unhandled change type: ${tag}`);
@@ -230,7 +264,7 @@ export async function handleInsert(snowflakeConn: any, relation: any, newRow: an
     
     const insertSQL = `
       INSERT INTO "${tableName}" (${columnNames.join(', ')})
-      VALUES (${values.join(', ')})
+      SELECT ${values.join(', ')}
     `;
     
     await executeSnowflakeQuery(snowflakeConn, insertSQL);
