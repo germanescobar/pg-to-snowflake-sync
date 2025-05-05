@@ -1,6 +1,8 @@
 import snowflake from 'snowflake-sdk';
 import { Config } from './types';
 import { Client } from 'pg';
+import fs from 'fs';
+import { ConnectionOptions } from 'snowflake-sdk';
 
 export class Queue<T> {
   private items: T[] = [];
@@ -27,15 +29,43 @@ export class Queue<T> {
 }
 
 export async function connectToSnowflake(config: Config) {
-  const snowflakeConn = snowflake.createConnection({
+  const connectionOptions: ConnectionOptions = {
     account: config.snowflake.account,
     username: config.snowflake.username,
-    password: config.snowflake.password,
     database: config.snowflake.database,
     schema: config.snowflake.schema,
     warehouse: config.snowflake.warehouse,
     role: config.snowflake.role
-  });
+  };
+
+  // Use key pair authentication if private key is provided
+  if (config.snowflake.privateKey || config.snowflake.privateKeyPath) {
+    let privateKey: string;
+    
+    // Load private key from file if path is provided
+    if (config.snowflake.privateKeyPath) {
+      try {
+        privateKey = fs.readFileSync(config.snowflake.privateKeyPath, 'utf8');
+      } catch (error) {
+        throw new Error(`Failed to read private key file: ${error}`);
+      }
+    } else {
+      // Use directly provided private key
+      privateKey = config.snowflake.privateKey!;
+    }
+    
+    connectionOptions.authenticator = 'SNOWFLAKE_JWT';
+    connectionOptions.privateKey = privateKey;
+    
+    // Add passphrase if provided
+    if (config.snowflake.privateKeyPassphrase) {
+      connectionOptions.privateKeyPass = config.snowflake.privateKeyPassphrase;
+    }
+  } else {
+    // Fall back to password authentication if no key is provided
+    connectionOptions.password = config.snowflake.password;
+  }
+  const snowflakeConn = snowflake.createConnection(connectionOptions);
   
   await new Promise<void>((resolve, reject) => {
     snowflakeConn!.connect((err: any) => err ? reject(err) : resolve());

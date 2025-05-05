@@ -3,7 +3,7 @@ import { connectToPostgresClient, executeSnowflakeQuery } from './utils';
 import { Config, SchemaCache, SchemaUpdateFunction, SnowflakeColumn, SnowflakeTable } from './types';
 import snowflake from 'snowflake-sdk';
 
-export async function createSchemaSync(snowflakeConn: snowflake.Connection, config: Config): Promise<SchemaUpdateFunction> {
+export async function createUpdateSchemaFn(snowflakeConn: snowflake.Connection, config: Config): Promise<SchemaUpdateFunction> {
   console.log('Loading current Snowflake schema');
   
   // Load the schema from Snowflake

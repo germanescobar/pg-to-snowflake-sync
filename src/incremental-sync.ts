@@ -2,28 +2,57 @@ import snowflake from 'snowflake-sdk';
 import { connectToPostgresClient, connectToSnowflake, executeSnowflakeQuery, formatValueForSnowflake } from './utils';
 import { Queue } from './utils';
 import { Config } from './types';
-import { createSchemaSync } from './schema-sync';
+import { createUpdateSchemaFn } from './schema-sync';
 import { LogicalReplicationService, PgoutputPlugin } from 'pg-logical-replication';
 import { Client } from 'pg';
 
+// Flag to control the service is running
+let isRunning = true;
+
+// The replication service
+let service: LogicalReplicationService | null = null;
+
+// The worker promise
+let worker: Promise<void> | null = null;
+
+// The queue of changes to process
+const changesQueue = new Queue<{lsn: string, log: any}>();
+
+/**
+ * Main function to run the incremental sync
+ */
 export async function runIncrementalSync(config: Config) {
   let snowflakeConn: snowflake.Connection | null = null;
   
   try {
     console.log('Starting incremental sync process...');
+    console.log('Configuration:', config);
     const start = Date.now();
 
     // Connect to Snowflake
     snowflakeConn = await connectToSnowflake(config);
 
-    // Sync data from PostgreSQL to Snowflake
-    await syncData(snowflakeConn, config);
+    // Create the function that updates the Snowflake schema
+    const updateSchema = await createUpdateSchemaFn(snowflakeConn, config);
 
-    const end = Date.now();
-    console.log(`Incremental sync completed successfully in ${((end - start) / 1000).toFixed(2)} seconds`);
+    // Start the replication service and enqueue the changes
+    await startReplication(config, changesQueue);
+
+    // Start the worker that will process changes from the queue
+    worker = startWorker(config, changesQueue, snowflakeConn, updateSchema);
+
+    // Wait for the worker to finish
+    await worker;
+
+    if (!config.sync.continuous) {
+      const end = Date.now();
+      console.log(`Incremental sync completed successfully in ${((end - start) / 1000).toFixed(2)} seconds`);
+    }
   } catch (error) {
     console.error('Error in replication process:', error);
   } finally {
+    console.log('Shutting down...');
+    await stop();
     if (snowflakeConn) {
       snowflakeConn.destroy((err: Error | undefined) => {
         if (err) console.error('Error destroying Snowflake connection:', err);
@@ -32,94 +61,51 @@ export async function runIncrementalSync(config: Config) {
   }
 }
 
-// Flag to control the queue processor
-let isProcessing = true;
-
-async function syncData(snowflakeConn: snowflake.Connection, config: Config) {
-  // Queue of changes to process
-  const changeQueue = new Queue<{lsn: string, log: any}>();
-
-  try {
-    // Create the function that updates the Snowflake schema
-    const updateSchema = await createSchemaSync(snowflakeConn, config);
-
-    // Start the worker that will process changes from the queue
-    const worker = startWorker(changeQueue, snowflakeConn, updateSchema);
-
-    // start the replication service and enqueue the changes
-    await sync(config, changeQueue);
-
-    // Wait for the worker to finish
-    await worker;
-  } catch (error) {
-    console.error('Error in syncData:', error);
-    throw error;
-  }
-}
-
-async function sync(config: Config, changeQueue: Queue<{lsn: string, log: any}>) {
+/**
+ * Starts the replication service, subscribes to changes and enqueues them
+ */
+async function startReplication(config: Config, changeQueue: Queue<{lsn: string, log: any}>) {
   // Capture the target LSN before we start syncing
   const targetLSN = await getCurrentLSN(config);
   const targetLSNNumeric = lsnToLong(targetLSN);
 
-  console.log(`Syncing up to LSN: ${targetLSN}`);
+  // Create the replication service
+  service = createReplicationService(config);
 
-  let service: LogicalReplicationService | null = null;
+  // Using pgoutput plugin (native to PostgreSQL, recommended)
+  const plugin = new PgoutputPlugin({
+    protoVersion: 1,
+    publicationNames: [config.postgres.publicationName]
+  });
 
-  try {
-    // Create the replication service
-    service = createReplicationService(config);
-
-    // Using pgoutput plugin (native to PostgreSQL, recommended)
-    const plugin = new PgoutputPlugin({
-      protoVersion: 1,
-      publicationNames: [config.postgres.publicationName]
-    });
-
-    // Promise to track completion of the sync
-    const syncCompletionPromise = new Promise<void>((resolve, reject) => {
-      // Track if we've reached our target LSN
-      let reachedTargetLSN = false;
-      
-      // Set up event handlers
-      service!.on('data', async (lsn: string, log: any) => {
-        console.log('LSN:', lsn);
-        
-        const currentLSNNumeric = lsnToLong(lsn);
-        
-        // Add the change to the queue
-        changeQueue.enqueue({ lsn, log });
-        
-        // Check if we've reached or exceeded our target LSN
-        if (currentLSNNumeric >= targetLSNNumeric && !reachedTargetLSN) {
-          reachedTargetLSN = true;
-          console.log(`Reached target LSN: ${lsn}`);
-          await service!.stop();
-          resolve();
-        }
-      });
-      
-      service!.on('error', (error: Error) => {
-        console.error('Replication error:', error);
-        reject(error);
-      });
-    });
-
-    // Start subscribing to changes - don't await as this will block the main thread indefinitely
-    service.subscribe(plugin, config.postgres.replicationSlot);
+  // Track if we've reached our target LSN
+  let reachedTargetLSN = false;
+  
+  // Set up event handlers
+  service.on('data', async (lsn: string, log: any) => {
+    console.log('LSN:', lsn);
     
-    // Wait for the sync to complete
-    console.log('Waiting for sync to complete')
-    await syncCompletionPromise;
-    console.log('Sync complete, all operations finished')
-  } finally {
-    isProcessing = false;
+    const currentLSNNumeric = lsnToLong(lsn);
     
-    console.log('Cleaning up resources')
-    if (service) {
-      await service.stop()
+    // Add the change to the queue
+    changeQueue.enqueue({ lsn, log });
+    
+    // Check if we've reached or exceeded our target LSN
+    if (!config.sync.continuous && currentLSNNumeric >= targetLSNNumeric && !reachedTargetLSN) {
+      reachedTargetLSN = true;
+      console.log(`Reached target LSN: ${lsn}`);
+      stop();
     }
-  }
+  });
+  
+  service.on('error', (error: Error) => {
+    console.error('Replication error:', error);
+  });
+
+  // Start subscribing to changes - don't await as this will block the main thread indefinitely
+  service.subscribe(plugin, config.postgres.replicationSlot);
+  
+  console.log('Replication service started');
 }
 
 function createReplicationService(config: Config) {
@@ -140,11 +126,13 @@ function createReplicationService(config: Config) {
 
 // Worker that processes changes from the queue
 async function startWorker(
+  config: Config,
   queue: Queue<{lsn: string, log: any}>,
   snowflakeConn: any,
   updateSchema: (relation: any) => Promise<void>
 ): Promise<void> {
-  while (isProcessing) {
+  const start = Date.now();
+  while (isRunning || queue.size() > 0) {
     const item = queue.dequeue();
     
     if (item) {
@@ -156,6 +144,10 @@ async function startWorker(
     } else {
       // If queue is empty, wait a bit before checking again
       await new Promise(resolve => setTimeout(resolve, 100));
+      if (!config.sync.continuous && new Date().getTime() - start > 5000) {
+        console.log('Worker is idle for 5 seconds, shutting down...');
+        await stop();
+      }
     }
   }
 }
@@ -408,3 +400,23 @@ export async function handleDelete(snowflakeConn: any, relation: any, key: any):
     throw error; // Re-throw to handle it in the caller
   }
 } 
+
+async function stop() {
+  if (service) {
+    await service.stop();
+    console.log('Replication service stopped.');
+  }
+  isRunning = false;
+  console.log('Worker stopped.');
+}
+
+process.on('SIGINT', async () => {
+  console.log('Received SIGINT. Shutting down gracefully...');
+  try {
+    await stop();
+    process.exit(0);
+  } catch (error) {
+    console.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+});

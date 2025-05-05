@@ -11,7 +11,10 @@ export type Config = {
   snowflake: {
     account: string;
     username: string;
-    password: string;
+    password?: string;
+    privateKey?: string; // PEM format
+    privateKeyPath?: string; // Path to PEM file
+    privateKeyPassphrase?: string; // Optional passphrase for PEM file
     database: string;
     schema: string;
     warehouse: string;
@@ -19,6 +22,7 @@ export type Config = {
   }
   sync: {
     excludedTables: string[];
+    continuous: boolean;
   }
 }
 

@@ -8,11 +8,14 @@ dotenv.config();
 async function main() {
   try {
     const args = process.argv.slice(2);
-    const config = loadConfig();
+    const config = loadConfig(args);
     
     if (args.includes('--full-sync') || args.includes('-f')) {
       await runFullSync(config);
     } else {
+      if (args.includes('--daemon') || args.includes('-d')) {
+        config.sync.continuous = true;
+      }
       await runIncrementalSync(config);
     }
   } catch (error) {

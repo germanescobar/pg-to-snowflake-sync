@@ -1,6 +1,6 @@
 import { Config } from "./types";
 
-export function loadConfig() {
+export function loadConfig(args: string[] = []) {
   return {
     postgres: {
       host: process.env.PG_HOST || '',
@@ -15,6 +15,9 @@ export function loadConfig() {
       account: process.env.SF_ACCOUNT || '',
       username: process.env.SF_USERNAME || '',
       password: process.env.SF_PASSWORD || '',
+      privateKey: process.env.SF_PRIVATE_KEY || '',
+      privateKeyPath: process.env.SF_PRIVATE_KEY_PATH || '',
+      privateKeyPassphrase: process.env.SF_PRIVATE_KEY_PASSPHRASE || '',
       database: process.env.SF_DATABASE || '',
       schema: process.env.SF_SCHEMA || 'PUBLIC',
       warehouse: process.env.SF_WAREHOUSE || '',
@@ -22,6 +25,7 @@ export function loadConfig() {
     },
     sync: {
       excludedTables: (process.env.EXCLUDED_TABLES || '').split(',').filter(Boolean),
+      continuous: args.includes('--daemon') || args.includes('-d') || false,
     }
   } as Config;
 }

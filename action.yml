@@ -42,5 +42,5 @@ inputs:
     description: 'Comma-separated list of tables to exclude from sync'
     required: false
 runs:
-  using: 'node20'
-  main: 'dist/pg-to-snowflake-sync.js' 
+  using: 'docker'
+  image: 'Dockerfile'
